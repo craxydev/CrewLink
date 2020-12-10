@@ -8,6 +8,7 @@ import { ipcRenderer, remote } from 'electron';
 import VAD from './vad';
 import { ISettings } from './Settings';
 import fs from 'fs';
+import { validatePeerConfig } from './validatePeerConfig';
 
 interface PeerConnections {
 	[peer: string]: Peer.Instance;
@@ -46,6 +47,26 @@ interface OtherTalking {
 
 interface OtherDead {
 	[playerId: number]: boolean; // isTalking
+}
+
+interface ICEServer {
+	url: string,
+	username: string | undefined,
+	credential: string | undefined,
+}
+
+interface PeerConfig {
+	forceRelayOnly: Boolean,
+	stunServers: ICEServer[],
+	turnServers: ICEServer[]
+}
+
+const DEFAULT_ICE_CONFIG: RTCConfiguration = {
+	iceServers: [
+		{
+			urls: 'stun:stun.l.google.com:19302'
+		}
+	]
 }
 
 // function clamp(number: number, min: number, max: number): number {
@@ -182,14 +203,41 @@ export default function Voice() {
 		socket.on('connect', () => {
 			setConnected(true);
 		});
+
 		socket.on('disconnect', () => {
 			setConnected(false);
 		});
 
+		let iceConfig: RTCConfiguration = DEFAULT_ICE_CONFIG;
+		socket.on('peerConfig', (peerConfig: PeerConfig) => {
+			if (!validatePeerConfig(peerConfig)) {
+				alert(`Server sent a malformed peer config. Default config will be used.${validatePeerConfig.errors ?
+					` See errors below:\n${validatePeerConfig.errors.map(error => error.dataPath + ' ' + error.message).join('\n')}` : ``
+					}`);
+				return;
+			}
+
+			if (peerConfig.forceRelayOnly && !peerConfig.turnServers) {
+				alert(`Server has forced relay mode enabled but provides no relay servers. Default config will be used.`);
+				return;
+			}
+
+			iceConfig = {
+				iceTransportPolicy: peerConfig.forceRelayOnly ? 'relay' : 'all',
+				iceServers: [...(peerConfig.stunServers || []), ...(peerConfig.turnServers || [])]
+					.map((server) => {
+						return {
+							urls: server.url,
+							username: server.username,
+							credential: server.credential
+						}
+					})
+			};
+		})
+
 		// Initialize variables
 		let audioListener: any;
 		let audio: boolean | MediaTrackConstraints = true;
-
 
 		// Get microphone settings
 		if (settings.microphone.toLowerCase() !== 'default')
@@ -266,14 +314,11 @@ export default function Voice() {
 			function createPeerConnection(peer: string, initiator: boolean) {
 				// console.log("Opening connection to ", peer, "Initiator: ", initiator);
 				const connection = new Peer({
-					stream, initiator, config: {
-						iceServers: [
-							{
-								'urls': 'stun:stun.l.google.com:19302'
-							}
-						]
-					}
+					stream,
+					initiator,
+					config: iceConfig
 				});
+
 				peerConnections[peer] = connection;
 
 				connection.on('stream', (stream: MediaStream) => {
